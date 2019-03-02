@@ -1,3 +1,25 @@
+# coding:utf-8
+"""
+scrapy-mongodb - MongoDB pipeline for Scrapy
+
+Homepage: https://github.com/sebdah/scrapy-mongodb
+Author: Sebastian Dahlgren <sebastian.dahlgren@gmail.com>
+License: Apache License 2.0 <http://www.apache.org/licenses/LICENSE-2.0.html>
+
+Copyright 2013 Sebastian Dahlgren
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 import datetime
 import logging
 
@@ -161,6 +183,37 @@ class MongoDBPipeline(BaseItemExporter):
             self.logger.error(msg)
             raise SyntaxError(msg)
 
+
+    # override BaseItemExporter
+    def _get_serialized_fields(self, item, default_value=None, include_empty=None):
+        """Return the fields to export as an iterable of tuples
+        (name, serialized_value)
+        """
+        if include_empty is None:
+            include_empty = self.export_empty_fields
+        if self.fields_to_export is None:
+            if include_empty and not isinstance(item, dict):
+                field_iter = six.iterkeys(item.fields)
+            else:
+                field_iter = six.iterkeys(item)
+        else:
+            if include_empty:
+                field_iter = self.fields_to_export
+            else:
+                field_iter = (x for x in self.fields_to_export if x in item)
+
+        for field_name in field_iter:
+            field = {} if isinstance(item, dict) else item.fields[field_name]
+            if field_name in item:
+                value = self.serialize_field(field, field_name, item[field_name])
+            else:
+                if 'default' in field:
+                    value = field['default']()
+                else:
+                    value = default_value
+
+            yield field_name, value
+
     def process_item(self, item, spider):
         """Process the item and add it to MongoDB.
 
@@ -170,8 +223,21 @@ class MongoDBPipeline(BaseItemExporter):
         :param spider: The spider running the queries
         :returns: Item object
         """
-        item = dict(self._get_serialized_fields(item))
+        item_fields = item.fields
 
+        item = dict(self._get_serialized_fields(item, include_empty=True))
+
+        new_item = {}
+        # setOnInsert
+        for field_name in six.iterkeys(item):
+            field = item_fields[field_name]
+            upsert = 'upsert' in field and field['upsert']
+            key = '$setOnInsert' if upsert else '$set'
+
+            new_item[key] = new_item[key] if key in new_item else {}
+            new_item[key][field_name] = value = item[field_name]
+
+        item = new_item
         item = dict((k, v) for k, v in six.iteritems(item) if v is not None and v != "")
 
         if self.config['buffer']:
@@ -242,9 +308,9 @@ class MongoDBPipeline(BaseItemExporter):
 
             if isinstance(self.config['unique_key'], list):
                 for k in dict(self.config['unique_key']).keys():
-                    key[k] = item[k]
+                    key[k] = item[k] if k in item else item['$set'][k]
             else:
-                key[self.config['unique_key']] = item[self.config['unique_key']]
+                key[self.config['unique_key']] = item[self.config['unique_key']] if self.config['unique_key'] in item else item['$set'][self.config['unique_key']]
 
             collection.update(key, item, upsert=True)
 
